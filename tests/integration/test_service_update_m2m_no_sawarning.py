@@ -38,7 +38,7 @@ it makes callers suspect the update silently failed.
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 import pytest
@@ -411,8 +411,8 @@ class Wallet790(UUIDBase):
     __tablename__ = "wallet_790"
 
     balance: Mapped[int] = mapped_column(default=0)
-    owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("owner_790.id"), unique=True)
-    owner: Mapped[Owner790 | None] = relationship(back_populates="wallet")
+    owner_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("owner_790.id"), unique=True)
+    owner: Mapped[Optional[Owner790]] = relationship(back_populates="wallet")
 
 
 class Owner790(UUIDBase):
@@ -422,7 +422,7 @@ class Owner790(UUIDBase):
     # Scalar (one-to-one) relationship: exercises the non-list/non-mapping
     # snapshot branch, and a scalar (rather than collection) back-populated
     # attribute on the related, already-persistent object.
-    wallet: Mapped[Wallet790 | None] = relationship(back_populates="owner", uselist=False)
+    wallet: Mapped[Optional[Wallet790]] = relationship(back_populates="owner", uselist=False)
 
 
 class WalletRepository790(SQLAlchemyAsyncRepository[Wallet790]):
