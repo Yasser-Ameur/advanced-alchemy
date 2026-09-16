@@ -268,3 +268,218 @@ async def test_service_update_m2m_dict_collection_no_sawarning_github_790(user_7
         assert check is not None
         await check_session.refresh(check, attribute_names=["members"])
         assert sorted(check.members) == ["alice", "bob"]
+
+
+tag_post_790 = Table(
+    "tag_post_790",
+    UUIDBase.metadata,
+    Column("tag_id", ForeignKey("tag_790.id"), primary_key=True),
+    Column("post_id", ForeignKey("post_790.id"), primary_key=True),
+)
+
+
+class Post790(UUIDBase):
+    __tablename__ = "post_790"
+
+    title: Mapped[str] = mapped_column(String(50))
+    tags: Mapped[list[Tag790]] = relationship(secondary=tag_post_790, back_populates="posts", lazy="raise")
+
+
+class Tag790(UUIDBase):
+    __tablename__ = "tag_790"
+
+    name: Mapped[str] = mapped_column(String(50))
+    # Deliberately not ``lazy="raise"``: once loaded, this collection is a plain
+    # materialized list in ``__dict__`` rather than an unloaded pending-mutation
+    # bucket, exercising the other branch of the detach helper.
+    posts: Mapped[list[Post790]] = relationship(secondary=tag_post_790, back_populates="tags")
+
+
+class TagRepository790(SQLAlchemyAsyncRepository[Tag790]):
+    model_type = Tag790
+
+
+class PostRepository790(SQLAlchemyAsyncRepository[Post790]):
+    model_type = Post790
+
+
+class PostService790(SQLAlchemyAsyncRepositoryService[Post790]):
+    repository_type = PostRepository790
+
+    async def to_model_on_update(self, data: Any) -> Any:
+        data = schema_dump(data)
+        tag_ids = data.pop("tags", None)
+        model = await self.to_model(data)
+        if tag_ids is not None:
+            model.tags = await TagRepository790(session=self.repository.session).get_many(
+                CollectionFilter(field_name="id", values=tag_ids)
+            )
+        return model
+
+
+async def test_service_update_m2m_relationship_materialized_backref_no_sawarning_github_790(
+    user_790_session: AsyncSession,
+) -> None:
+    """When the back-populated collection is already loaded (a plain list in
+    ``__dict__``, not a ``lazy="raise"`` pending mutation), the helper must
+    remove the transient instance from that materialized list instead."""
+    session = user_790_session
+    tag1 = Tag790(name="release")
+    post = Post790(title="orig")
+    session.add_all([tag1, post])
+    await session.commit()
+    post_id: UUID = post.id
+    tag_ids = [tag1.id]
+
+    # Force ``tag1.posts`` to materialize as a loaded list in ``__dict__``
+    # before the hook assigns a transient ``Post790`` onto it.
+    await session.refresh(tag1, attribute_names=["posts"])
+    assert tag1.__dict__["posts"] == []
+
+    service = PostService790(session=session)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        updated = await service.update(
+            {"tags": tag_ids, "title": "renamed"},
+            post_id,
+            load=[selectinload(Post790.tags)],
+            auto_commit=True,
+        )
+
+    assert not _sa_warnings(caught), [str(w.message) for w in _sa_warnings(caught)]
+    assert updated.title == "renamed"
+    # The transient model from the hook must have been removed again, leaving
+    # only the real, persisted post that the service's own copy loop assigns
+    # afterwards - not a stale entry for an object with no identity.
+    assert [p.id for p in tag1.__dict__["posts"]] == [post_id]
+
+    async with AsyncSession(session.bind, expire_on_commit=False) as check_session:
+        check = await check_session.get(Post790, post_id)
+        assert check is not None
+        await check_session.refresh(check, attribute_names=["tags"])
+        assert [t.name for t in check.tags] == ["release"]
+
+
+class UserServiceTransientRelated790(SQLAlchemyAsyncRepositoryService[User790]):
+    """Variant of :class:`UserService790` whose hook also assigns a brand-new,
+    never-persisted ``Role790`` alongside the resolved ones - the detach
+    helper must skip it rather than crash on a related object with no session."""
+
+    repository_type = UserRepository790
+
+    async def to_model_on_update(self, data: Any) -> Any:
+        data = schema_dump(data)
+        role_ids = data.pop("roles", None)
+        model = await self.to_model(data)
+        if role_ids is not None:
+            roles = await RoleRepository790(session=self.repository.session).get_many(
+                CollectionFilter(field_name="id", values=role_ids)
+            )
+            model.roles = [*roles, Role790(name="not_yet_persisted")]
+        return model
+
+
+async def test_service_update_m2m_relationship_skips_transient_related_github_790(
+    user_790_session: AsyncSession,
+) -> None:
+    """A related object with no session (still transient) among the resolved
+    values must be skipped by the detach helper, not treated as a pollution
+    source to clean up."""
+    session = user_790_session
+    role1 = Role790(name="admin")
+    user = User790(alias="orig")
+    session.add_all([role1, user])
+    await session.commit()
+    user_id: UUID = user.id
+    role_ids = [role1.id]
+
+    service = UserServiceTransientRelated790(session=session)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        updated = await service.update(
+            {"roles": role_ids, "alias": "x"},
+            user_id,
+            load=[selectinload(User790.roles)],
+            auto_commit=True,
+        )
+
+    assert not _sa_warnings(caught), [str(w.message) for w in _sa_warnings(caught)]
+    assert updated.alias == "x"
+
+
+class Wallet790(UUIDBase):
+    __tablename__ = "wallet_790"
+
+    balance: Mapped[int] = mapped_column(default=0)
+    owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("owner_790.id"), unique=True)
+    owner: Mapped[Owner790 | None] = relationship(back_populates="wallet")
+
+
+class Owner790(UUIDBase):
+    __tablename__ = "owner_790"
+
+    name: Mapped[str] = mapped_column(String(50))
+    # Scalar (one-to-one) relationship: exercises the non-list/non-mapping
+    # snapshot branch, and a scalar (rather than collection) back-populated
+    # attribute on the related, already-persistent object.
+    wallet: Mapped[Wallet790 | None] = relationship(back_populates="owner", uselist=False)
+
+
+class WalletRepository790(SQLAlchemyAsyncRepository[Wallet790]):
+    model_type = Wallet790
+
+
+class OwnerRepository790(SQLAlchemyAsyncRepository[Owner790]):
+    model_type = Owner790
+
+
+class OwnerService790(SQLAlchemyAsyncRepositoryService[Owner790]):
+    repository_type = OwnerRepository790
+
+    async def to_model_on_update(self, data: Any) -> Any:
+        data = schema_dump(data)
+        wallet_id = data.pop("wallet_id", None)
+        model = await self.to_model(data)
+        if wallet_id is not None:
+            model.wallet = await WalletRepository790(session=self.repository.session).get_one(id=wallet_id)
+        return model
+
+
+async def test_service_update_scalar_relationship_no_sawarning_github_790(
+    user_790_session: AsyncSession,
+) -> None:
+    """A scalar (one-to-one) relationship resolved by the hook must also be
+    detached from its persistent related object's scalar backref, not just
+    from list/dict-shaped collections."""
+    session = user_790_session
+    wallet = Wallet790(balance=100, owner_id=None)
+    owner = Owner790(name="orig")
+    session.add_all([wallet, owner])
+    await session.commit()
+    owner_id: UUID = owner.id
+    wallet_id: UUID = wallet.id
+
+    service = OwnerService790(session=session)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        updated = await service.update(
+            {"wallet_id": wallet_id, "name": "renamed"},
+            owner_id,
+            load=[selectinload(Owner790.wallet)],
+            auto_commit=True,
+        )
+
+    assert not _sa_warnings(caught), [str(w.message) for w in _sa_warnings(caught)]
+    assert updated.name == "renamed"
+    # The transient model from the hook must have been cleared from the
+    # wallet's scalar backref; the service's own copy loop then points it at
+    # the real, persisted owner instead.
+    assert wallet.__dict__.get("owner") is not None
+    assert wallet.__dict__["owner"].id == owner_id
+
+    async with AsyncSession(session.bind, expire_on_commit=False) as check_session:
+        check = await check_session.get(Owner790, owner_id)
+        assert check is not None
+        await check_session.refresh(check, attribute_names=["wallet"])
+        assert check.wallet is not None
+        assert check.wallet.id == wallet_id

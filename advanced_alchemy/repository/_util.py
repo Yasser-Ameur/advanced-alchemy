@@ -952,7 +952,8 @@ def snapshot_and_detach_relationships(instance: Any, mapper: Any) -> dict[str, A
         if not is_transient or not back_attr or raw_value is None:
             continue
         for related in related_items:
-            if related is None or inspect(related, raiseerr=False) is None or object_session(related) is None:
+            related_state: Any = inspect(related, raiseerr=False)  # pyright: ignore[reportUnknownVariableType]
+            if related is None or related_state is None or object_session(related) is None:
                 continue
             # Read the raw, already-loaded value to avoid triggering a lazy load
             # (or raising, for relationships configured with ``lazy="raise"``):
@@ -967,8 +968,7 @@ def snapshot_and_detach_relationships(instance: Any, mapper: Any) -> dict[str, A
                 # The back-populated collection was never loaded (e.g. lazy="raise"),
                 # so the backref sync recorded the append as a pending mutation
                 # rather than materializing the collection. Cancel it there instead.
-                related_state: Any = inspect(related)
-                pending: Any = getattr(related_state, "_pending_mutations", None)
+                pending: Any = getattr(related_state, "_pending_mutations", None)  # pyright: ignore[reportUnknownArgumentType]
                 added_items: Any = getattr(pending.get(back_attr), "added_items", None) if pending else None
                 if added_items is not None and instance in added_items:
                     added_items.discard(instance)
